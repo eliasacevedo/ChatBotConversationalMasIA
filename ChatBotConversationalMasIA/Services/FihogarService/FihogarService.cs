@@ -1,9 +1,8 @@
 using System.Collections.Generic;
-using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Models;
-using Services.AuthenticationManager;
 using Services.DoRequest;
 
 namespace Services.FihogarService{
@@ -11,7 +10,6 @@ namespace Services.FihogarService{
     {
         private readonly IDoRequest doRequest;
         private readonly IConfiguration configuration;
-        private readonly IAuthenticationManager authenticationManager;
         private const string FIHOGAR_KEY_FILE_TOKEN = "FihogarToken";
         private const string FIHOGAR_KEY_FILE_PROVIDER = "FihogarProvider";
         private const string FIHOGAR_KEY_FILE_USERNAME = "FihogarUsername";
@@ -19,64 +17,107 @@ namespace Services.FihogarService{
         private const string FIHOGAR_ACCESS_KEY_PATH = "https://api.uat.4wrd.tech:8243/token";
         private const string FIHOGAR_AUTORIZE_PROVIDER_PATH = "https://api.uat.4wrd.tech:8243/authorize/2.0/token";
         private const string FIHOGAR_GET_ACCOUNT_PATH= "https://api.uat.4wrd.tech:8243/manage-accounts/api/2.0/accounts/";
-        
-        private string tokenId;
-        public string TokenId
-        {
-            get { return tokenId; }
-            set { tokenId = value; }
-        }
-        
-        private string authorizationToken;
-        public string AuthorizationToken
-        {
-            get { 
-                return authorizationToken; 
-            }
-            set { authorizationToken = value; }
-        }
+        private string TokenId { get; set; }
+        private string AuthorizationToken { get; set; }
 
-        public FihogarService(IDoRequest request, IConfiguration configuration, IAuthenticationManager authenticationManager)
+        private const string TOKEN_ID_HEADER = "token-id";
+        private const string AUTHORIZATION_HEADER = "Authorization";
+
+        public FihogarService(IDoRequest request, IConfiguration configuration)
         {
             doRequest = request;
             this.configuration = configuration;
-            this.authenticationManager = authenticationManager;
+        }
+
+        private async Task<T> DoRequestGet<T>(string path, IDictionary<string, string> headers) {
+            var response = await doRequest.Get(path, headers);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized) {
+                await RefreshTokens(headers);
+                return await DoRequestGet<T>(path, headers);
+            }
+            else if (response.StatusCode != System.Net.HttpStatusCode.OK) {
+                throw new System.Exception("Hubo un error en la consulta");
+            }
+
+            using var responseStream = await response.Content.ReadAsStreamAsync();
+            return await JsonSerializer.DeserializeAsync<T>(responseStream);
+        }
+
+        private async Task<T> DoRequestPost<T>(string path, IDictionary<string, string> headers, IDictionary<string, string> form) {
+            var response = await doRequest.Post(path, headers, form);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized) {
+                await RefreshTokens(headers);
+                return await DoRequestPost<T>(path, headers, form);
+            }
+            else if (!response.IsSuccessStatusCode) {
+                throw new System.Exception("Hubo un error en la consulta");
+            }
+
+            using var responseStream = await response.Content.ReadAsStreamAsync();
+            return await JsonSerializer.DeserializeAsync<T>(responseStream);
+        }
+
+        private async Task RefreshTokens(IDictionary<string, string> headers) {
+            var grantTypeToken = "client_credentials";
+            var accessTokenResponse = await AccessToken(grantTypeToken, configuration[FIHOGAR_KEY_FILE_TOKEN]);
+            TokenId = accessTokenResponse.Accesstoken;
+            var grantTypeAuthorization = "password";
+            var authorizeTokenResponse = await AuthorizeProvider(configuration[FIHOGAR_KEY_FILE_PROVIDER], configuration[FIHOGAR_KEY_FILE_USERNAME], configuration[FIHOGAR_KEY_FILE_PASSWORD], grantTypeAuthorization, TokenId);
+            AuthorizationToken = authorizeTokenResponse.Accesstoken;
+            refreshTokensDictionary(headers);
+        }
+
+        private void refreshTokensDictionary(IDictionary<string, string> headers) {
+            if (headers.ContainsKey(TOKEN_ID_HEADER)) {
+                headers[TOKEN_ID_HEADER] =  AuthorizationToken;
+            }
+
+            if (headers.ContainsKey(AUTHORIZATION_HEADER)) {
+                headers[AUTHORIZATION_HEADER] = $"Bearer {TokenId}";
+            }
         }
 
         public async Task<AccessToken> AccessToken(string grantType, string token)
         {
             const string path = FIHOGAR_ACCESS_KEY_PATH;
             var headers = new Dictionary<string, string>();
-            headers.Add("Authorization", configuration[FIHOGAR_KEY_FILE_TOKEN]);
+            headers.Add(AUTHORIZATION_HEADER, $"Bearer {configuration[FIHOGAR_KEY_FILE_TOKEN]}");
 
             var form = new Dictionary<string, string>();
-            form.Add("grant_type", "client_credentials");
+            form.Add("grant_type", grantType);
 
-            return await doRequest.Post<AccessToken>(path, headers, form);
+            return await DoRequestPost<AccessToken>(path, headers, form);
         }
 
-        public async Task<AccessTokenExtended> AutorizeProvider(string provider, string username, string password, string grantType, string token)
+        public async Task<AccessTokenExtended> AuthorizeProvider(string provider, string username, string password, string grantType, string token)
         {
             string path = $"{FIHOGAR_AUTORIZE_PROVIDER_PATH}?provider={configuration[FIHOGAR_KEY_FILE_PROVIDER]}";
             var headers = new Dictionary<string, string>();
-            headers.Add("Authorization", authenticationManager.TokenId);
+            headers.Add(AUTHORIZATION_HEADER, $"Bearer {TokenId}");
 
             var form = new Dictionary<string, string>();
-            form.Add("grant_type", "password");
+            form.Add("grant_type", grantType);
             form.Add("username", configuration[FIHOGAR_KEY_FILE_USERNAME]);
             form.Add("password", configuration[FIHOGAR_KEY_FILE_PASSWORD]);
 
-            return await doRequest.Post<AccessTokenExtended>(path, headers, form);
+            return await DoRequestPost<AccessTokenExtended>(path, headers, form);
         }
 
-        public async Task<AccountDetails> GetAccount(string provider, string tokenId, string authorization)
+        public async Task<AccountDetails> GetAccount()
         {
             string path = $"{FIHOGAR_GET_ACCOUNT_PATH}?provider={configuration[FIHOGAR_KEY_FILE_PROVIDER]}";
-            var headers = new Dictionary<string, string>();
-            headers.Add("token-id", authenticationManager.TokenId);
-            headers.Add("Authorization", $"Bearer {authenticationManager.AuthorizationToken}");
+            var headers = getAuthorizedHeaders();
 
-            return await doRequest.Get<AccountDetails>(path, headers);
+            return await DoRequestGet<AccountDetails>(path, headers);
+        }
+
+        private IDictionary<string, string> getAuthorizedHeaders() {
+            var headers = new Dictionary<string, string>();
+            headers.Add(TOKEN_ID_HEADER, AuthorizationToken);
+            headers.Add(AUTHORIZATION_HEADER, $"Bearer {TokenId}");
+            return headers;
         }
     }
 }

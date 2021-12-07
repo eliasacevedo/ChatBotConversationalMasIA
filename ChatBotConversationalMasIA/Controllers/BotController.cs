@@ -6,6 +6,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Bot.Builder;
 using Microsoft.Bot.Builder.Integration.AspNet.Core;
+using Models;
+using Services.FihogarService;
 using System.Threading.Tasks;
 
 namespace ChatBotConversationalMasIA.Controllers
@@ -19,11 +21,13 @@ namespace ChatBotConversationalMasIA.Controllers
     {
         private readonly IBotFrameworkHttpAdapter Adapter;
         private readonly IBot Bot;
+        private readonly IFihogarService FihogarService;
 
-        public BotController(IBotFrameworkHttpAdapter adapter, IBot bot)
+        public BotController(IBotFrameworkHttpAdapter adapter, IBot bot, IFihogarService fihogarService)
         {
             Adapter = adapter;
             Bot = bot;
+            FihogarService = fihogarService;
         }
 
         [HttpPost, HttpGet]
@@ -32,6 +36,12 @@ namespace ChatBotConversationalMasIA.Controllers
             // Delegate the processing of the HTTP POST to the adapter.
             // The adapter will invoke the bot.
             await Adapter.ProcessAsync(Request, Response, Bot);
+        }
+
+        [HttpGet]
+        [Route("accounts")]
+        public async Task<AccountDetails> GetAccountAsync() {
+            return await FihogarService.GetAccount();
         }
     }
 }
